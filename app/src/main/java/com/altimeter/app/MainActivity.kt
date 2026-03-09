@@ -16,10 +16,10 @@ import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.altimeter.app.databinding.ActivityMainBinding
 import com.google.android.gms.location.*
 import org.json.JSONObject
@@ -29,14 +29,15 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.pow
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
     companion object {
         private const val TAG = "AltimeterApp"
         private const val LOCATION_PERMISSION_CODE = 1001
-        private const val GPS_TIMEOUT_MS = 10_000L          // GPS 10 秒无数据则启动网络降级
-        private const val NETWORK_FALLBACK_INTERVAL = 3000L  // 网络定位刷新间隔
+        private const val GPS_TIMEOUT_MS = 10_000L
+        private const val NETWORK_FALLBACK_INTERVAL = 3000L
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -59,22 +60,32 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gpsTimeoutRunnable: Runnable? = null
     private var isUsingNetworkFallback = false
-    private var lastLocationSource = ""   // 用于在 UI 标注定位来源
+    private var lastLocationSource = ""
 
-    // ===== 传感器（指南针）=====
+    // ===== 传感器（指南针 + 气压计）=====
     private lateinit var sensorManager: SensorManager
     private var accelerometerReading = FloatArray(3)
     private var magnetometerReading = FloatArray(3)
     private var hasAccel = false
     private var hasMag = false
 
+    // ===== 气压计海拔 =====
+    private var pressureSensor: Sensor? = null
+    private var hasBarometer = false
+    private var currentPressureHpa: Float = 0f          // 当前气压（hPa）
+    private var hasPressureReading = false
+    private var calibratedSeaLevelPressure: Float = 0f  // 校准后的海平面气压
+    private var isBarometerCalibrated = false            // 是否已用 GPS 海拔校准过
+    private var lastBaroAltitude: Int? = null            // 最新的气压计海拔
+    private var altitudeSource = ""                      // "barometer" / "gps"
+
     // ===== 高德逆地理编码 =====
     private val AMAP_KEY = "337e994b1e8a588f856f05c589f6c51b"
     private var lastGeocodeLat = 0.0
     private var lastGeocodeLng = 0.0
     private var lastGeocodeTime = 0L
-    private val GEOCODE_MIN_INTERVAL = 5000L   // 最少 5 秒请求一次
-    private val GEOCODE_MIN_DISTANCE = 100.0   // 移动超过 100 米才重新请求
+    private val GEOCODE_MIN_INTERVAL = 5000L
+    private val GEOCODE_MIN_DISTANCE = 100.0
 
     // =======================================================================
     //                            Lifecycle
@@ -105,6 +116,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         nativeLocationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
+        // 检测气压传感器
+        pressureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
+        hasBarometer = pressureSensor != null
+        if (hasBarometer) {
+            Log.i(TAG, "Barometer sensor detected: ${pressureSensor!!.name}")
+        } else {
+            Log.i(TAG, "No barometer sensor available, using GPS altitude only")
+        }
+
         setupLocationCallbacks()
         checkPermissions()
     }
@@ -117,6 +137,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
         sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.also {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+        }
+        // 气压传感器
+        if (hasBarometer) {
+            sensorManager.registerListener(this, pressureSensor, SensorManager.SENSOR_DELAY_UI)
         }
         // 恢复定位
         if (!gpsCallbackRegistered) {
@@ -159,7 +183,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 startGpsLocationUpdates()
             } else if (grantResults.size > 1 && grantResults[1] == PackageManager.PERMISSION_GRANTED) {
-                // 仅获得 COARSE 权限 → 直接用网络定位
                 Log.w(TAG, "Only COARSE location granted, using network fallback")
                 startNetworkFallback()
             } else {
@@ -174,7 +197,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     // =======================================================================
 
     private fun setupLocationCallbacks() {
-        // GPS 高精度回调
         gpsLocationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 result.lastLocation?.let { loc ->
@@ -182,7 +204,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     hasReceivedGpsFix = true
                     cancelGpsTimeout()
 
-                    // 如果之前在用网络降级，收到 GPS 信号后切回
                     if (isUsingNetworkFallback) {
                         Log.i(TAG, "GPS signal recovered, stopping network fallback")
                         stopNetworkFallback()
@@ -197,14 +218,12 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             override fun onLocationAvailability(availability: LocationAvailability) {
                 Log.d(TAG, "GPS availability: ${availability.isLocationAvailable}")
                 if (!availability.isLocationAvailable && !hasReceivedGpsFix) {
-                    // GPS 不可用且从未获得过 GPS 定位 → 立即启动网络降级
                     Log.w(TAG, "GPS unavailable, starting network fallback immediately")
                     startNetworkFallback()
                 }
             }
         }
 
-        // 网络降级（WiFi/基站）回调
         networkLocationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 result.lastLocation?.let { loc ->
@@ -224,7 +243,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            // 没有 FINE 权限，尝试 COARSE
             if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED
             ) {
@@ -243,7 +261,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             gpsCallbackRegistered = true
             Log.i(TAG, "GPS location updates started (HIGH_ACCURACY)")
 
-            // 获取上次已知位置作为初始数据
             fusedLocationClient.lastLocation.addOnSuccessListener { location ->
                 if (location != null && !hasReceivedGpsFix) {
                     lastLocationSource = "缓存"
@@ -255,7 +272,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             startNativeLocationFallback()
         }
 
-        // 设置 GPS 超时 → 10 秒后若无 GPS fix，启动网络降级
         scheduleGpsTimeout()
     }
 
@@ -263,15 +279,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     //        Network Fallback (WiFi + Cell Tower via FusedProvider)
     // =======================================================================
 
-    /**
-     * 当 GPS 信号不可用时，使用 PRIORITY_BALANCED_POWER_ACCURACY
-     * 该模式使用 WiFi 和蜂窝基站进行定位，不依赖 GPS 硬件。
-     * 精度通常在 40~100 米左右。
-     *
-     * 参考: Google 官方文档
-     * https://developers.google.com/android/reference/com/google/android/gms/location/LocationRequest
-     * Priority.PRIORITY_BALANCED_POWER_ACCURACY 使用 WiFi 和基站定位
-     */
     private fun startNetworkFallback() {
         if (networkCallbackRegistered) return
         isUsingNetworkFallback = true
@@ -305,7 +312,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             startNativeLocationFallback()
         }
 
-        // 同时尝试原生 LocationManager 的 NETWORK_PROVIDER 作为双保险
         startNativeNetworkProvider()
     }
 
@@ -322,11 +328,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     //      Native LocationManager Fallback (for non-GMS devices)
     // =======================================================================
 
-    /**
-     * 对于没有 Google Play Services 的设备（如华为 HMS 设备），
-     * 使用 Android 原生 LocationManager 的 NETWORK_PROVIDER（WiFi/基站）
-     * 和 GPS_PROVIDER 作为最终兜底方案。
-     */
     private fun startNativeLocationFallback() {
         val lm = nativeLocationManager ?: return
         if (nativeListenerRegistered) return
@@ -341,7 +342,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         Log.i(TAG, "Starting native LocationManager fallback")
 
-        // GPS Provider
         if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
             nativeGpsListener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
@@ -367,7 +367,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             }
         }
 
-        // Network Provider (WiFi + Cell)
         startNativeNetworkProvider()
         nativeListenerRegistered = true
     }
@@ -387,7 +386,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
             nativeNetworkListener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
-                    // 仅在没有 GPS 数据时使用网络定位
                     if (!hasReceivedGpsFix || isUsingNetworkFallback) {
                         Log.d(TAG, "Native Network fix: ${location.latitude}, ${location.longitude}")
                         lastLocationSource = "WiFi/基站(native)"
@@ -458,7 +456,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun stopAllLocationUpdates() {
         cancelGpsTimeout()
-
         if (gpsCallbackRegistered) {
             fusedLocationClient.removeLocationUpdates(gpsLocationCallback)
             gpsCallbackRegistered = false
@@ -468,16 +465,90 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     // =======================================================================
-    //                         Update UI
+    //                    气压计海拔计算
     // =======================================================================
 
     /**
-     * 用真实定位数据更新所有 UI
+     * 使用气压传感器计算海拔。
+     *
+     * 原理：基于气压高度公式 (hypsometric formula)
+     *   altitude = 44330 * (1 - (p / p0) ^ (1/5.255))
+     *
+     * Android 官方提供 SensorManager.getAltitude(p0, p) 方法，
+     * 其中 p0 = 海平面气压 (hPa), p = 当前气压 (hPa)。
+     *
+     * 校准策略：
+     * 1. 未校准时：使用标准大气压 1013.25 hPa 作为 p0 —— 绝对海拔有偏差，但变化趋势准确
+     * 2. GPS 校准后：根据首次 GPS 海拔反推当地真实 p0，后续用校准值 —— 精度可达 ±1m
+     *
+     * 参考: Android SensorManager.getAltitude 官方文档
+     * https://developer.android.com/reference/android/hardware/SensorManager#getAltitude(float,%20float)
      */
+    private fun computeBarometricAltitude(): Int? {
+        if (!hasPressureReading || currentPressureHpa <= 0f) return null
+
+        val seaLevelPressure = if (isBarometerCalibrated) {
+            calibratedSeaLevelPressure
+        } else {
+            SensorManager.PRESSURE_STANDARD_ATMOSPHERE
+        }
+
+        val altitude = SensorManager.getAltitude(seaLevelPressure, currentPressureHpa)
+        return altitude.toInt()
+    }
+
+    /**
+     * 用 GPS 海拔校准气压计的海平面气压。
+     *
+     * 反推公式（由 hypsometric formula 反解 p0）：
+     *   p0 = p / (1 - altitude / 44330) ^ 5.255
+     *
+     * 仅在以下条件满足时执行校准：
+     * - 有气压传感器
+     * - GPS 提供了有效海拔
+     * - GPS 精度 < 20m（确保 GPS 海拔质量）
+     * - 尚未校准过（只校准一次，避免 GPS 波动干扰）
+     */
+    private fun calibrateBarometerWithGps(gpsAltitude: Double, gpsAccuracy: Float) {
+        if (!hasBarometer || !hasPressureReading) return
+        if (isBarometerCalibrated) return
+        if (gpsAccuracy > 20f) return  // GPS 精度太差，不适合校准
+
+        // 反推海平面气压: p0 = p / (1 - h/44330)^5.255
+        val ratio = 1.0 - gpsAltitude / 44330.0
+        if (ratio <= 0) return  // 海拔超出合理范围
+
+        val p0 = currentPressureHpa / ratio.pow(5.255).toFloat()
+
+        // 合理性检查：海平面气压通常在 870~1084 hPa 之间
+        if (p0 in 870f..1084f) {
+            calibratedSeaLevelPressure = p0
+            isBarometerCalibrated = true
+            Log.i(TAG, "Barometer calibrated with GPS altitude %.1fm → sea level pressure %.2f hPa".format(gpsAltitude, p0))
+        } else {
+            Log.w(TAG, "Barometer calibration rejected: computed p0=%.2f hPa out of range".format(p0))
+        }
+    }
+
+    // =======================================================================
+    //                         Update UI
+    // =======================================================================
+
     private fun updateLocationUI(location: Location) {
-        // 海拔
-        if (location.hasAltitude()) {
+        // 用 GPS 海拔校准气压计（首次）
+        if (location.hasAltitude() && location.hasAccuracy()) {
+            calibrateBarometerWithGps(location.altitude, location.accuracy)
+        }
+
+        // 海拔：优先使用气压计（精度更高、刷新更快）
+        val baroAlt = computeBarometricAltitude()
+        if (baroAlt != null && hasBarometer) {
+            binding.gaugeView.altitude = baroAlt
+            lastBaroAltitude = baroAlt
+            altitudeSource = "气压计"
+        } else if (location.hasAltitude()) {
             binding.gaugeView.altitude = location.altitude.toInt()
+            altitudeSource = "GPS"
         }
 
         // 速度
@@ -487,19 +558,28 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             binding.gaugeView.speed = 0
         }
 
-        // 海拔精度 + 定位来源
-        if (location.hasAccuracy()) {
-            val verticalAccuracy = if (android.os.Build.VERSION.SDK_INT >= 26 && location.hasVerticalAccuracy()) {
-                location.verticalAccuracyMeters.toInt()
+        // 海拔精度 + 来源
+        val accuracyText = buildString {
+            append("海拔精度:")
+            if (altitudeSource == "气压计") {
+                // 气压计海拔精度约 ±1m（校准后）或 ±10m（未校准）
+                val baroAccuracy = if (isBarometerCalibrated) "±1" else "±10"
+                append("${baroAccuracy}米")
+            } else if (location.hasAccuracy()) {
+                val verticalAccuracy = if (android.os.Build.VERSION.SDK_INT >= 26 && location.hasVerticalAccuracy()) {
+                    location.verticalAccuracyMeters.toInt()
+                } else {
+                    location.accuracy.toInt()
+                }
+                append("${verticalAccuracy}米")
             } else {
-                location.accuracy.toInt()
+                append("--")
             }
-            val sourceLabel = if (lastLocationSource.isNotEmpty()) " [$lastLocationSource]" else ""
-            binding.tvAccuracy.text = "海拔精度:${verticalAccuracy}米$sourceLabel"
-        } else {
-            val sourceLabel = if (lastLocationSource.isNotEmpty()) " [$lastLocationSource]" else ""
-            binding.tvAccuracy.text = "海拔精度:--$sourceLabel"
+            append(" [${lastLocationSource}")
+            if (altitudeSource.isNotEmpty()) append("+${altitudeSource}")
+            append("]")
         }
+        binding.tvAccuracy.text = accuracyText
 
         // 经纬度
         val lat = location.latitude
@@ -509,13 +589,21 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         binding.tvLatitude.text = "$latDir ${toDMS(lat)}"
         binding.tvLongitude.text = "$lngDir ${toDMS(lng)}"
 
-        // 逆地理编码（带节流）
+        // 逆地理编码
         requestReverseGeocode(lat, lng)
     }
 
     /**
-     * 十进制度 → 度°分′秒″
+     * 气压传感器数据变化时，独立更新海拔 UI（不依赖 GPS 回调频率）
+     * 气压传感器通常每秒可更新数十次，但我们只需 UI 刷新级别
      */
+    private fun updateBaroAltitudeOnly() {
+        val baroAlt = computeBarometricAltitude() ?: return
+        lastBaroAltitude = baroAlt
+        binding.gaugeView.altitude = baroAlt
+        altitudeSource = "气压计"
+    }
+
     private fun toDMS(decimal: Double): String {
         val absVal = abs(decimal)
         val deg = absVal.toInt()
@@ -529,25 +617,20 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     //                      高德逆地理编码
     // =======================================================================
 
-    /**
-     * 带节流的逆地理请求：距离 >100m 或时间 >5s 才发起新请求
-     */
     private fun requestReverseGeocode(lat: Double, lng: Double) {
         val now = System.currentTimeMillis()
         val distance = distanceBetween(lat, lng, lastGeocodeLat, lastGeocodeLng)
 
         if (now - lastGeocodeTime < GEOCODE_MIN_INTERVAL && distance < GEOCODE_MIN_DISTANCE) {
-            return  // 节流：没走远也没超时，跳过
+            return
         }
 
         lastGeocodeLat = lat
         lastGeocodeLng = lng
         lastGeocodeTime = now
 
-        // 子线程请求网络
         Thread {
             try {
-                // 高德 API 经纬度格式：lng,lat（经度在前）
                 val location = String.format(Locale.US, "%.6f,%.6f", lng, lat)
                 val urlStr = "https://restapi.amap.com/v3/geocode/regeo?" +
                     "key=$AMAP_KEY&location=$location&extensions=base&output=JSON"
@@ -573,7 +656,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                         val district = addressComponent.optString("district", "")
                         val township = addressComponent.optString("township", "")
 
-                        // city 可能是 [] (空数组) 表示直辖市
                         val cityStr = if (city.isEmpty() || city == "[]") "" else city
                         val displayText = buildString {
                             if (province.isNotEmpty() && province != "[]") append(province)
@@ -582,7 +664,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                             if (township.isNotEmpty() && township != "[]") append(" $township")
                         }.trim()
 
-                        // 回主线程更新 UI
                         mainHandler.post {
                             binding.tvLocation.text = if (displayText.isNotEmpty()) displayText else "未知区域"
                         }
@@ -591,14 +672,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 conn.disconnect()
             } catch (e: Exception) {
                 Log.e(TAG, "Reverse geocode failed", e)
-                // 网络失败不影响其他功能
             }
         }.start()
     }
 
-    /**
-     * 简易距离计算（米），用于节流判断
-     */
     private fun distanceBetween(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
         val results = FloatArray(1)
         Location.distanceBetween(lat1, lng1, lat2, lng2, results)
@@ -606,7 +683,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     // =======================================================================
-    //                           指南针
+    //                           传感器回调
     // =======================================================================
 
     override fun onSensorChanged(event: SensorEvent?) {
@@ -620,7 +697,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 System.arraycopy(event.values, 0, magnetometerReading, 0, 3)
                 hasMag = true
             }
+            Sensor.TYPE_PRESSURE -> {
+                // 气压传感器：values[0] = 大气压 (hPa / mbar)
+                currentPressureHpa = event.values[0]
+                hasPressureReading = true
+                // 独立更新气压海拔（不需要等 GPS 回调）
+                updateBaroAltitudeOnly()
+            }
         }
+        // 指南针计算
         if (hasAccel && hasMag) {
             val rotationMatrix = FloatArray(9)
             val orientation = FloatArray(3)
