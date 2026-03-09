@@ -7,6 +7,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# Release 需要写权限
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build APK
@@ -74,7 +78,23 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      # 9. 上传 Debug APK
+      # 9. 生成版本号（基于日期 + 短 SHA）
+      - name: Generate version tag
+        id: version
+        run: |
+          VERSION="v1.0.$(date +'%Y%m%d')-${GITHUB_SHA::7}"
+          echo "tag=$VERSION" >> $GITHUB_OUTPUT
+          echo "date=$(date +'%Y-%m-%d %H:%M')" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      # 10. 重命名 APK（带版本号）
+      - name: Rename APKs
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          cp app/build/outputs/apk/release/app-release.apk "app/build/outputs/apk/release/AltimeterApp-${VERSION}-release.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/AltimeterApp-${VERSION}-debug.apk"
+
+      # 11. 上传 Artifact（保留备份）
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -82,7 +102,6 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      # 10. 上传 Release APK（已签名）
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
@@ -90,7 +109,33 @@ jobs:
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 90
 
-      # 11. 清理 keystore
+      # 12. 创建 GitHub Release（仅 push 到 main 时）
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "Release ${{ steps.version.outputs.tag }}"
+          body: |
+            ## 🏔️ 实时高度表 - ${{ steps.version.outputs.tag }}
+
+            **构建时间**: ${{ steps.version.outputs.date }} UTC
+            **Commit**: [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+
+            ### 📦 下载
+            - **AltimeterApp-release.apk** — 签名 Release 包，可直接安装
+            - **AltimeterApp-debug.apk** — Debug 包，含调试信息
+
+            ### 📝 变更
+            ${{ github.event.head_commit.message }}
+          files: |
+            app/build/outputs/apk/release/AltimeterApp-${{ steps.version.outputs.tag }}-release.apk
+            app/build/outputs/apk/debug/AltimeterApp-${{ steps.version.outputs.tag }}-debug.apk
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+
+      # 13. 清理 keystore
       - name: Cleanup keystore
         if: always()
         run: rm -f ${{ github.workspace }}/release.jks
