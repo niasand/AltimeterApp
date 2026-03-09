@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     // 位置
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
+    private var locationCallbackRegistered = false
 
     // 传感器（指南针）
     private lateinit var sensorManager: SensorManager
@@ -52,6 +53,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // 初始化 — 所有数据显示为等待状态
+        binding.gaugeView.altitude = null
+        binding.gaugeView.speed = null
+        binding.tvAccuracy.text = "海拔精度:--"
+        binding.tvLatitude.text = "北纬 --°--′--″"
+        binding.tvLongitude.text = "东经 --°--′--″"
 
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -86,6 +94,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
         ) {
             startLocationUpdates()
+        } else {
+            // 权限被拒绝，提示用户
+            binding.tvAccuracy.text = "需要位置权限才能获取海拔"
         }
     }
 
@@ -93,7 +104,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private fun setupLocationCallback() {
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
-                result.lastLocation?.let { updateUI(it) }
+                // 使用最新的一条位置
+                result.lastLocation?.let { updateLocationUI(it) }
             }
         }
     }
@@ -101,30 +113,59 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private fun startLocationUpdates() {
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
             .setMinUpdateIntervalMillis(500L)
+            .setWaitForAccurateLocation(false)
             .build()
 
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             == PackageManager.PERMISSION_GRANTED
         ) {
             fusedLocationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+            locationCallbackRegistered = true
+
+            // 同时尝试获取 last known location 作为初始值
+            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                if (location != null) {
+                    updateLocationUI(location)
+                }
+            }
         }
     }
 
-    private fun updateUI(location: Location) {
-        val altitudeM = location.altitude.toInt()
-        val speedKmh = (location.speed * 3.6).toInt()
-        val accuracy = if (location.hasAccuracy()) location.accuracy.toInt() else 0
+    /**
+     * 核心：用真实 GPS 数据更新所有 UI 元素
+     */
+    private fun updateLocationUI(location: Location) {
+        // —— 海拔 ——
+        if (location.hasAltitude()) {
+            binding.gaugeView.altitude = location.altitude.toInt()
+        }
 
-        // 仪表盘
-        binding.gaugeView.altitude = altitudeM
-        binding.gaugeView.speed = speedKmh
+        // —— 速度 ——
+        if (location.hasSpeed()) {
+            binding.gaugeView.speed = (location.speed * 3.6).toInt()  // m/s → km/h
+        } else {
+            binding.gaugeView.speed = 0
+        }
 
-        // 海拔精度
-        binding.tvAccuracy.text = "海拔精度:${accuracy}米"
+        // —— 海拔精度 ——
+        if (location.hasAccuracy()) {
+            val verticalAccuracy = if (android.os.Build.VERSION.SDK_INT >= 26 && location.hasVerticalAccuracy()) {
+                location.verticalAccuracyMeters.toInt()
+            } else {
+                location.accuracy.toInt()
+            }
+            binding.tvAccuracy.text = "海拔精度:${verticalAccuracy}米"
+        } else {
+            binding.tvAccuracy.text = "海拔精度:--"
+        }
 
-        // 经纬度 → 度分秒
-        binding.tvLatitude.text = "北纬 ${toDMS(location.latitude)}"
-        binding.tvLongitude.text = "东经 ${toDMS(location.longitude)}"
+        // —— 经纬度 ——
+        val lat = location.latitude
+        val lng = location.longitude
+        val latDir = if (lat >= 0) "北纬" else "南纬"
+        val lngDir = if (lng >= 0) "东经" else "西经"
+        binding.tvLatitude.text = "$latDir ${toDMS(lat)}"
+        binding.tvLongitude.text = "$lngDir ${toDMS(lng)}"
     }
 
     /**
@@ -139,7 +180,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         return String.format(Locale.US, "%d°%d′%d″", deg, min, sec)
     }
 
-    // =========== 指南针（传感器）===========
+    // =========== 指南针 ===========
     override fun onResume() {
         super.onResume()
         sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.also {
@@ -148,12 +189,19 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.also {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
+        // 恢复定位
+        if (!locationCallbackRegistered) {
+            startLocationUpdates()
+        }
     }
 
     override fun onPause() {
         super.onPause()
         sensorManager.unregisterListener(this)
-        fusedLocationClient.removeLocationUpdates(locationCallback)
+        if (locationCallbackRegistered) {
+            fusedLocationClient.removeLocationUpdates(locationCallback)
+            locationCallbackRegistered = false
+        }
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
