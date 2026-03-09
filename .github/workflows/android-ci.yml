@@ -25,20 +25,19 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # 3. 配置 Android SDK（runner 自带，但显式声明确保兼容）
+      # 3. Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # 4. 生成 Gradle Wrapper（如果仓库中没有 gradlew）
-      - name: Generate Gradle Wrapper
+      # 4. Gradle Wrapper 容错
+      - name: Ensure Gradle Wrapper
         run: |
           if [ ! -f "./gradlew" ]; then
-            echo "gradlew not found, generating wrapper..."
             gradle wrapper --gradle-version 8.0
           fi
           chmod +x ./gradlew
 
-      # 5. Gradle 缓存加速
+      # 5. Gradle 缓存
       - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
@@ -49,15 +48,33 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      # 6. 编译 Debug APK
+      # 6. 解码 Keystore
+      - name: Decode Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > ${{ github.workspace }}/release.jks
+            echo "KEYSTORE_FILE=${{ github.workspace }}/release.jks" >> $GITHUB_ENV
+            echo "✅ Keystore decoded"
+          else
+            echo "⚠️ No KEYSTORE_BASE64 secret, Release will use debug signing"
+          fi
+
+      # 7. 编译 Debug APK
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      # 7. 编译 Release APK（未签名）
-      - name: Build Release APK
+      # 8. 编译 Release APK（Gradle 内部签名）
+      - name: Build Signed Release APK
+        env:
+          KEYSTORE_FILE: ${{ env.KEYSTORE_FILE }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      # 8. 上传 Debug APK
+      # 9. 上传 Debug APK
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -65,64 +82,15 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      # 9. 上传 Release APK
+      # 10. 上传 Release APK（已签名）
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-unsigned
-          path: app/build/outputs/apk/release/app-release-unsigned.apk
-          retention-days: 30
-
-  # ========== 可选：签名 Release ==========
-  sign-release:
-    name: Sign Release APK
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Download unsigned Release APK
-        uses: actions/download-artifact@v4
-        with:
-          name: app-release-unsigned
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Decode keystore
-        if: env.KEYSTORE_BASE64 != ''
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: echo "$KEYSTORE_BASE64" | base64 -d > release.jks
-
-      - name: Sign APK with apksigner
-        if: env.KEYSTORE_BASE64 != ''
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)
-          ${BUILD_TOOLS_DIR}zipalign -v -p 4 app-release-unsigned.apk app-release-aligned.apk
-          ${BUILD_TOOLS_DIR}apksigner sign \
-            --ks release.jks \
-            --ks-pass pass:$KEYSTORE_PASSWORD \
-            --ks-key-alias $KEY_ALIAS \
-            --key-pass pass:$KEY_PASSWORD \
-            --out app-release-signed.apk \
-            app-release-aligned.apk
-          ${BUILD_TOOLS_DIR}apksigner verify --verbose app-release-signed.apk
-
-      - name: Upload Signed Release APK
-        if: env.KEYSTORE_BASE64 != ''
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-signed
-          path: app-release-signed.apk
+          name: app-release
+          path: app/build/outputs/apk/release/app-release.apk
           retention-days: 90
+
+      # 11. 清理 keystore
+      - name: Cleanup keystore
+        if: always()
+        run: rm -f ${{ github.workspace }}/release.jks
