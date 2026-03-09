@@ -5,7 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # 支持手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -25,11 +25,20 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # 3. 授予 Gradle Wrapper 执行权限
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
+      # 3. 配置 Android SDK（runner 自带，但显式声明确保兼容）
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      # 4. Gradle 缓存加速
+      # 4. 生成 Gradle Wrapper（如果仓库中没有 gradlew）
+      - name: Generate Gradle Wrapper
+        run: |
+          if [ ! -f "./gradlew" ]; then
+            echo "gradlew not found, generating wrapper..."
+            gradle wrapper --gradle-version 8.0
+          fi
+          chmod +x ./gradlew
+
+      # 5. Gradle 缓存加速
       - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
@@ -40,15 +49,15 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      # 5. 编译 Debug APK
+      # 6. 编译 Debug APK
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      # 6. 编译 Release APK（未签名）
+      # 7. 编译 Release APK（未签名）
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      # 7. 上传 Debug APK 产物
+      # 8. 上传 Debug APK
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -56,7 +65,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      # 8. 上传 Release APK 产物
+      # 9. 上传 Release APK
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
@@ -64,12 +73,7 @@ jobs:
           path: app/build/outputs/apk/release/app-release-unsigned.apk
           retention-days: 30
 
-  # ========== 可选：签名 Release 构建 ==========
-  # 需要在 GitHub Repo → Settings → Secrets 中配置以下 Secrets:
-  #   KEYSTORE_BASE64   —  base64 编码的 .jks 文件
-  #   KEYSTORE_PASSWORD  —  keystore 密码
-  #   KEY_ALIAS          —  key 别名
-  #   KEY_PASSWORD       —  key 密码
+  # ========== 可选：签名 Release ==========
   sign-release:
     name: Sign Release APK
     needs: build
@@ -102,13 +106,8 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # 找到 build-tools 中的 apksigner
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)
-          
-          # zipalign 优化
           ${BUILD_TOOLS_DIR}zipalign -v -p 4 app-release-unsigned.apk app-release-aligned.apk
-          
-          # 签名
           ${BUILD_TOOLS_DIR}apksigner sign \
             --ks release.jks \
             --ks-pass pass:$KEYSTORE_PASSWORD \
@@ -116,8 +115,6 @@ jobs:
             --key-pass pass:$KEY_PASSWORD \
             --out app-release-signed.apk \
             app-release-aligned.apk
-          
-          # 验证签名
           ${BUILD_TOOLS_DIR}apksigner verify --verbose app-release-signed.apk
 
       - name: Upload Signed Release APK
