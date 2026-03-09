@@ -1,6 +1,8 @@
 package com.altimeter.app
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.Sensor
@@ -15,6 +17,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
+import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -57,6 +61,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     // ===== 定位状态 =====
     private var hasReceivedGpsFix = false
+    private var hasReceivedAnyLocation = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gpsTimeoutRunnable: Runnable? = null
     private var isUsingNetworkFallback = false
@@ -72,12 +77,12 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     // ===== 气压计海拔 =====
     private var pressureSensor: Sensor? = null
     private var hasBarometer = false
-    private var currentPressureHpa: Float = 0f          // 当前气压（hPa）
+    private var currentPressureHpa: Float = 0f
     private var hasPressureReading = false
-    private var calibratedSeaLevelPressure: Float = 0f  // 校准后的海平面气压
-    private var isBarometerCalibrated = false            // 是否已用 GPS 海拔校准过
-    private var lastBaroAltitude: Int? = null            // 最新的气压计海拔
-    private var altitudeSource = ""                      // "barometer" / "gps"
+    private var calibratedSeaLevelPressure: Float = 0f
+    private var isBarometerCalibrated = false
+    private var lastBaroAltitude: Int? = null
+    private var altitudeSource = ""
 
     // ===== 高德逆地理编码 =====
     private val AMAP_KEY = "337e994b1e8a588f856f05c589f6c51b"
@@ -87,6 +92,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private val GEOCODE_MIN_INTERVAL = 5000L
     private val GEOCODE_MIN_DISTANCE = 100.0
 
+    // ===== 高德海拔查询 =====
+    private var hasQueriedElevation = false
+    private var elevationFromApi: Int? = null
+
     // =======================================================================
     //                            Lifecycle
     // =======================================================================
@@ -94,7 +103,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 全屏沉浸 — 使用 WindowCompat API (替代已废弃的 systemUiVisibility)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -122,27 +130,25 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (hasBarometer) {
             Log.i(TAG, "Barometer sensor detected: ${pressureSensor!!.name}")
         } else {
-            Log.i(TAG, "No barometer sensor available, using GPS altitude only")
+            Log.i(TAG, "No barometer sensor available, using GPS/API altitude")
         }
 
         setupLocationCallbacks()
+        setupCopyToClipboard()
         checkPermissions()
     }
 
     override fun onResume() {
         super.onResume()
-        // 指南针传感器
         sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.also {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
         sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.also {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
         }
-        // 气压传感器
         if (hasBarometer) {
             sensorManager.registerListener(this, pressureSensor, SensorManager.SENSOR_DELAY_UI)
         }
-        // 恢复定位
         if (!gpsCallbackRegistered) {
             startGpsLocationUpdates()
         }
@@ -152,6 +158,29 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         super.onPause()
         sensorManager.unregisterListener(this)
         stopAllLocationUpdates()
+    }
+
+    // =======================================================================
+    //                       点击复制到剪贴板
+    // =======================================================================
+
+    private fun setupCopyToClipboard() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+        fun TextView.copyOnClick() {
+            setOnClickListener {
+                val text = this.text.toString()
+                if (text.isNotEmpty() && text != "定位中..." && !text.contains("--")) {
+                    val clip = ClipData.newPlainText("位置信息", text)
+                    clipboard.setPrimaryClip(clip)
+                    Toast.makeText(this@MainActivity, "已复制: $text", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        binding.tvLocation.copyOnClick()
+        binding.tvLatitude.copyOnClick()
+        binding.tvLongitude.copyOnClick()
     }
 
     // =======================================================================
@@ -200,7 +229,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         gpsLocationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 result.lastLocation?.let { loc ->
-                    Log.d(TAG, "GPS fix: lat=${loc.latitude}, lng=${loc.longitude}, acc=${loc.accuracy}")
+                    Log.d(TAG, "GPS fix: lat=${loc.latitude}, lng=${loc.longitude}, alt=${loc.altitude}, hasAlt=${loc.hasAltitude()}")
                     hasReceivedGpsFix = true
                     cancelGpsTimeout()
 
@@ -227,7 +256,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         networkLocationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 result.lastLocation?.let { loc ->
-                    Log.d(TAG, "Network fix: lat=${loc.latitude}, lng=${loc.longitude}, acc=${loc.accuracy}")
+                    Log.d(TAG, "Network fix: lat=${loc.latitude}, lng=${loc.longitude}, hasAlt=${loc.hasAltitude()}")
                     lastLocationSource = "WiFi/基站"
                     updateLocationUI(loc)
                 }
@@ -262,7 +291,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             Log.i(TAG, "GPS location updates started (HIGH_ACCURACY)")
 
             fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                if (location != null && !hasReceivedGpsFix) {
+                if (location != null && !hasReceivedAnyLocation) {
                     lastLocationSource = "缓存"
                     updateLocationUI(location)
                 }
@@ -284,7 +313,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         isUsingNetworkFallback = true
 
         Log.i(TAG, "Starting network fallback (BALANCED_POWER_ACCURACY - WiFi/Cell)")
-        binding.tvAccuracy.text = "GPS信号弱，使用WiFi/基站定位..."
 
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED &&
@@ -345,15 +373,12 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
             nativeGpsListener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
-                    Log.d(TAG, "Native GPS fix: ${location.latitude}, ${location.longitude}")
                     hasReceivedGpsFix = true
                     lastLocationSource = "GPS(native)"
                     updateLocationUI(location)
                 }
                 override fun onProviderEnabled(provider: String) {}
-                override fun onProviderDisabled(provider: String) {
-                    Log.w(TAG, "Native GPS provider disabled")
-                }
+                override fun onProviderDisabled(provider: String) {}
                 @Deprecated("Deprecated in API")
                 override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
             }
@@ -387,7 +412,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             nativeNetworkListener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
                     if (!hasReceivedGpsFix || isUsingNetworkFallback) {
-                        Log.d(TAG, "Native Network fix: ${location.latitude}, ${location.longitude}")
                         lastLocationSource = "WiFi/基站(native)"
                         updateLocationUI(location)
                     }
@@ -406,8 +430,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             } catch (e: Exception) {
                 Log.e(TAG, "Native network provider request failed", e)
             }
-        } else {
-            Log.w(TAG, "NETWORK_PROVIDER not available on this device")
         }
     }
 
@@ -416,7 +438,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         nativeNetworkListener?.let {
             lm.removeUpdates(it)
             nativeNetworkListener = null
-            Log.i(TAG, "Native NETWORK_PROVIDER stopped")
         }
     }
 
@@ -450,10 +471,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         gpsTimeoutRunnable = null
     }
 
-    // =======================================================================
-    //                    Stop All Location Updates
-    // =======================================================================
-
     private fun stopAllLocationUpdates() {
         cancelGpsTimeout()
         if (gpsCallbackRegistered) {
@@ -468,22 +485,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     //                    气压计海拔计算
     // =======================================================================
 
-    /**
-     * 使用气压传感器计算海拔。
-     *
-     * 原理：基于气压高度公式 (hypsometric formula)
-     *   altitude = 44330 * (1 - (p / p0) ^ (1/5.255))
-     *
-     * Android 官方提供 SensorManager.getAltitude(p0, p) 方法，
-     * 其中 p0 = 海平面气压 (hPa), p = 当前气压 (hPa)。
-     *
-     * 校准策略：
-     * 1. 未校准时：使用标准大气压 1013.25 hPa 作为 p0 —— 绝对海拔有偏差，但变化趋势准确
-     * 2. GPS 校准后：根据首次 GPS 海拔反推当地真实 p0，后续用校准值 —— 精度可达 ±1m
-     *
-     * 参考: Android SensorManager.getAltitude 官方文档
-     * https://developer.android.com/reference/android/hardware/SensorManager#getAltitude(float,%20float)
-     */
     private fun computeBarometricAltitude(): Int? {
         if (!hasPressureReading || currentPressureHpa <= 0f) return null
 
@@ -497,37 +498,80 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         return altitude.toInt()
     }
 
-    /**
-     * 用 GPS 海拔校准气压计的海平面气压。
-     *
-     * 反推公式（由 hypsometric formula 反解 p0）：
-     *   p0 = p / (1 - altitude / 44330) ^ 5.255
-     *
-     * 仅在以下条件满足时执行校准：
-     * - 有气压传感器
-     * - GPS 提供了有效海拔
-     * - GPS 精度 < 20m（确保 GPS 海拔质量）
-     * - 尚未校准过（只校准一次，避免 GPS 波动干扰）
-     */
     private fun calibrateBarometerWithGps(gpsAltitude: Double, gpsAccuracy: Float) {
         if (!hasBarometer || !hasPressureReading) return
         if (isBarometerCalibrated) return
-        if (gpsAccuracy > 20f) return  // GPS 精度太差，不适合校准
+        if (gpsAccuracy > 20f) return
 
-        // 反推海平面气压: p0 = p / (1 - h/44330)^5.255
         val ratio = 1.0 - gpsAltitude / 44330.0
-        if (ratio <= 0) return  // 海拔超出合理范围
+        if (ratio <= 0) return
 
         val p0 = currentPressureHpa / ratio.pow(5.255).toFloat()
 
-        // 合理性检查：海平面气压通常在 870~1084 hPa 之间
         if (p0 in 870f..1084f) {
             calibratedSeaLevelPressure = p0
             isBarometerCalibrated = true
             Log.i(TAG, "Barometer calibrated with GPS altitude %.1fm → sea level pressure %.2f hPa".format(gpsAltitude, p0))
-        } else {
-            Log.w(TAG, "Barometer calibration rejected: computed p0=%.2f hPa out of range".format(p0))
         }
+    }
+
+    // =======================================================================
+    //                   通过经纬度查询海拔（网络 API）
+    // =======================================================================
+
+    /**
+     * 当 GPS 和气压计都无法提供海拔时，通过 Open Elevation API 查询。
+     * 这是最终兜底方案，精度约 ±30m（取决于 DEM 数据分辨率）。
+     */
+    private fun queryElevationFromApi(lat: Double, lng: Double) {
+        if (hasQueriedElevation) return
+        hasQueriedElevation = true
+
+        Thread {
+            try {
+                // 使用 Open-Elevation API（免费，无需 key）
+                val urlStr = String.format(
+                    Locale.US,
+                    "https://api.open-elevation.com/api/v1/lookup?locations=%.6f,%.6f",
+                    lat, lng
+                )
+                val url = URL(urlStr)
+                val conn = url.openConnection() as HttpURLConnection
+                conn.connectTimeout = 8000
+                conn.readTimeout = 8000
+                conn.requestMethod = "GET"
+
+                if (conn.responseCode == 200) {
+                    val reader = BufferedReader(InputStreamReader(conn.inputStream, "UTF-8"))
+                    val response = reader.readText()
+                    reader.close()
+
+                    val json = JSONObject(response)
+                    val results = json.optJSONArray("results")
+                    if (results != null && results.length() > 0) {
+                        val elevation = results.getJSONObject(0).optDouble("elevation", Double.NaN)
+                        if (!elevation.isNaN()) {
+                            val alt = elevation.toInt()
+                            Log.i(TAG, "Elevation from API: ${alt}m for ($lat, $lng)")
+                            elevationFromApi = alt
+                            mainHandler.post {
+                                // 仅在没有更好的海拔来源时使用
+                                if (binding.gaugeView.altitude == null) {
+                                    binding.gaugeView.altitude = alt
+                                    altitudeSource = "DEM查询"
+                                    updateAccuracyLabel(null, null)
+                                }
+                            }
+                        }
+                    }
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "Elevation API query failed", e)
+                // API 失败 → 允许重试
+                hasQueriedElevation = false
+            }
+        }.start()
     }
 
     // =======================================================================
@@ -535,12 +579,17 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     // =======================================================================
 
     private fun updateLocationUI(location: Location) {
+        hasReceivedAnyLocation = true
+        // 通知 gauge 已有位置数据（即使海拔还没获取）
+        binding.gaugeView.hasLocationButNoAltitude = true
+
         // 用 GPS 海拔校准气压计（首次）
         if (location.hasAltitude() && location.hasAccuracy()) {
             calibrateBarometerWithGps(location.altitude, location.accuracy)
         }
 
-        // 海拔：优先使用气压计（精度更高、刷新更快）
+        // === 海拔决策 ===
+        // 优先级：气压计（最快） > GPS 海拔 > API 查询海拔
         val baroAlt = computeBarometricAltitude()
         if (baroAlt != null && hasBarometer) {
             binding.gaugeView.altitude = baroAlt
@@ -549,6 +598,22 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         } else if (location.hasAltitude()) {
             binding.gaugeView.altitude = location.altitude.toInt()
             altitudeSource = "GPS"
+        } else if (elevationFromApi != null) {
+            binding.gaugeView.altitude = elevationFromApi
+            altitudeSource = "DEM查询"
+        } else {
+            // 没有任何海拔数据来源 → 通过 API 查询
+            queryElevationFromApi(location.latitude, location.longitude)
+            // 同时立即显示 -- 而非卡在"定位中..."
+            // altitude 保持 null，gauge 会显示 "定位中..."
+            // 但我们给一个超时：5秒后如果还是 null，显示 "--"
+            mainHandler.postDelayed({
+                if (binding.gaugeView.altitude == null) {
+                    binding.gaugeView.altitude = null  // 触发 "海拔不可用" 显示
+                    altitudeSource = "不可用"
+                    updateAccuracyLabel(null, null)
+                }
+            }, 5000)
         }
 
         // 速度
@@ -558,28 +623,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             binding.gaugeView.speed = 0
         }
 
-        // 海拔精度 + 来源
-        val accuracyText = buildString {
-            append("海拔精度:")
-            if (altitudeSource == "气压计") {
-                // 气压计海拔精度约 ±1m（校准后）或 ±10m（未校准）
-                val baroAccuracy = if (isBarometerCalibrated) "±1" else "±10"
-                append("${baroAccuracy}米")
-            } else if (location.hasAccuracy()) {
-                val verticalAccuracy = if (android.os.Build.VERSION.SDK_INT >= 26 && location.hasVerticalAccuracy()) {
-                    location.verticalAccuracyMeters.toInt()
-                } else {
-                    location.accuracy.toInt()
-                }
-                append("${verticalAccuracy}米")
-            } else {
-                append("--")
-            }
-            append(" [${lastLocationSource}")
-            if (altitudeSource.isNotEmpty()) append("+${altitudeSource}")
-            append("]")
-        }
-        binding.tvAccuracy.text = accuracyText
+        // 精度标签
+        updateAccuracyLabel(location, if (altitudeSource.isNotEmpty()) altitudeSource else null)
 
         // 经纬度
         val lat = location.latitude
@@ -593,9 +638,42 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         requestReverseGeocode(lat, lng)
     }
 
+    private fun updateAccuracyLabel(location: Location?, source: String?) {
+        val accuracyText = buildString {
+            append("海拔精度:")
+            val src = source ?: altitudeSource
+            when (src) {
+                "气压计" -> {
+                    val baroAccuracy = if (isBarometerCalibrated) "±1" else "±10"
+                    append("${baroAccuracy}米")
+                }
+                "GPS" -> {
+                    if (location != null && location.hasAccuracy()) {
+                        val verticalAccuracy = if (android.os.Build.VERSION.SDK_INT >= 26 && location.hasVerticalAccuracy()) {
+                            location.verticalAccuracyMeters.toInt()
+                        } else {
+                            location.accuracy.toInt()
+                        }
+                        append("${verticalAccuracy}米")
+                    } else {
+                        append("--")
+                    }
+                }
+                "DEM查询" -> append("±30米")
+                "不可用" -> append("--")
+                else -> append("--")
+            }
+            if (lastLocationSource.isNotEmpty()) {
+                append(" [$lastLocationSource")
+                if (src.isNotEmpty() && src != "不可用") append("+$src")
+                append("]")
+            }
+        }
+        binding.tvAccuracy.text = accuracyText
+    }
+
     /**
-     * 气压传感器数据变化时，独立更新海拔 UI（不依赖 GPS 回调频率）
-     * 气压传感器通常每秒可更新数十次，但我们只需 UI 刷新级别
+     * 气压传感器数据变化时，独立更新海拔 UI
      */
     private fun updateBaroAltitudeOnly() {
         val baroAlt = computeBarometricAltitude() ?: return
@@ -698,14 +776,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 hasMag = true
             }
             Sensor.TYPE_PRESSURE -> {
-                // 气压传感器：values[0] = 大气压 (hPa / mbar)
                 currentPressureHpa = event.values[0]
                 hasPressureReading = true
-                // 独立更新气压海拔（不需要等 GPS 回调）
                 updateBaroAltitudeOnly()
             }
         }
-        // 指南针计算
         if (hasAccel && hasMag) {
             val rotationMatrix = FloatArray(9)
             val orientation = FloatArray(3)

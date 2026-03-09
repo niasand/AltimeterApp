@@ -29,6 +29,10 @@ class AltimeterGaugeView @JvmOverloads constructor(
     var compassDegree: Float = 0f
         set(value) { field = value; invalidate() }
 
+    /** 是否已有位置但无海拔（用于显示"海拔不可用"而非"定位中..."） */
+    var hasLocationButNoAltitude: Boolean = false
+        set(value) { field = value; invalidate() }
+
     // ---------- 画笔 ----------
     private val outerRingPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val innerCirclePaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -128,7 +132,7 @@ class AltimeterGaugeView @JvmOverloads constructor(
         val labelY = cy - innerRadius * 0.28f
         canvas.drawText("当前海拔", cx, labelY, labelPaint)
 
-        // 4) 海拔数字 + 米（null 时显示 "--"）
+        // 4) 海拔数字 + 米
         val altY = cy + innerRadius * 0.12f
         val currentAlt = altitude
         if (currentAlt != null) {
@@ -143,11 +147,15 @@ class AltimeterGaugeView @JvmOverloads constructor(
             canvas.drawText(altStr, startX, altY, numPaint)
             canvas.drawText("米", startX + numberWidth + gap, altY, unitTextPaint)
         } else {
-            // 等待定位
             val waitPaint = Paint(altitudeTextPaint).apply {
-                textSize = innerRadius * 0.30f
+                textSize = innerRadius * 0.24f
             }
-            canvas.drawText("定位中...", cx, altY, waitPaint)
+            if (hasLocationButNoAltitude) {
+                // 已有位置但海拔不可用
+                canvas.drawText("获取海拔中...", cx, altY, waitPaint)
+            } else {
+                canvas.drawText("定位中...", cx, altY, waitPaint)
+            }
         }
 
         // 5) 当前速度
