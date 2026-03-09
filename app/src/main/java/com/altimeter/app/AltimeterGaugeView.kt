@@ -129,11 +129,11 @@ class AltimeterGaugeView @JvmOverloads constructor(
         canvas.drawCircle(cx, cy - innerRadius * 0.1f, innerRadius * 0.8f, highlightPaint)
 
         // 3) "当前海拔" 标签
-        val labelY = cy - innerRadius * 0.28f
+        val labelY = cy - innerRadius * 0.42f
         canvas.drawText("当前海拔", cx, labelY, labelPaint)
 
         // 4) 海拔数字 + 米
-        val altY = cy + innerRadius * 0.12f
+        val altY = cy + innerRadius * 0.08f
         val currentAlt = altitude
         if (currentAlt != null) {
             val altStr = currentAlt.toString()
@@ -159,7 +159,7 @@ class AltimeterGaugeView @JvmOverloads constructor(
         }
 
         // 5) 当前速度
-        val speedY = cy + innerRadius * 0.38f
+        val speedY = cy + innerRadius * 0.35f
         val currentSpeed = speed
         if (currentSpeed != null) {
             canvas.drawText("当前速度 ${currentSpeed}km/h", cx, speedY, speedPaint)
