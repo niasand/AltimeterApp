@@ -17,7 +17,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
-import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -167,20 +166,29 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private fun setupCopyToClipboard() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
-        fun TextView.copyOnClick() {
-            setOnClickListener {
-                val text = this.text.toString()
-                if (text.isNotEmpty() && text != "定位中..." && !text.contains("--")) {
-                    val clip = ClipData.newPlainText("位置信息", text)
-                    clipboard.setPrimaryClip(clip)
-                    Toast.makeText(this@MainActivity, "已复制: $text", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
+        // 整个底部区域点击 → 一次性复制 地址 + 经纬度
+        binding.layoutLocationInfo.setOnClickListener {
+            val location = binding.tvLocation.text.toString()
+            val latitude = binding.tvLatitude.text.toString()
+            val longitude = binding.tvLongitude.text.toString()
 
-        binding.tvLocation.copyOnClick()
-        binding.tvLatitude.copyOnClick()
-        binding.tvLongitude.copyOnClick()
+            // 未定位完成时不复制
+            if (latitude.contains("--") && longitude.contains("--")) return@setOnClickListener
+
+            val copyText = buildString {
+                if (location.isNotEmpty() && location != "定位中..." && location != "未知区域") {
+                    append(location)
+                    append("\n")
+                }
+                append(latitude)
+                append("\n")
+                append(longitude)
+            }
+
+            val clip = ClipData.newPlainText("位置信息", copyText)
+            clipboard.setPrimaryClip(clip)
+            Toast.makeText(this, "已复制位置信息", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // =======================================================================

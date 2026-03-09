@@ -17,7 +17,7 @@
         android:gravity="center_horizontal"
         android:paddingTop="48dp">
 
-        <!-- 顶部标题栏 — 去掉右上角三个点 -->
+        <!-- 顶部标题栏 -->
         <RelativeLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -55,15 +55,21 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="16dp" />
 
-        <!-- 底部信息区 -->
+        <!-- 底部信息区：整体可点击，一次性复制地址+经纬度 -->
         <LinearLayout
+            android:id="@+id/layoutLocationInfo"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center_horizontal"
-            android:layout_marginBottom="56dp">
+            android:layout_marginBottom="56dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?android:attr/selectableItemBackground"
+            android:paddingHorizontal="20dp"
+            android:paddingVertical="10dp">
 
-            <!-- 逆地理 — 城市地区（可点击复制） -->
+            <!-- 逆地理 — 城市地区 -->
             <TextView
                 android:id="@+id/tvLocation"
                 android:layout_width="wrap_content"
@@ -72,14 +78,9 @@
                 android:textColor="#FFFFFFFF"
                 android:textSize="15sp"
                 android:textStyle="bold"
-                android:layout_marginBottom="10dp"
-                android:clickable="true"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="4dp" />
+                android:layout_marginBottom="10dp" />
 
-            <!-- 纬度（可点击复制） -->
+            <!-- 纬度 -->
             <TextView
                 android:id="@+id/tvLatitude"
                 android:layout_width="wrap_content"
@@ -87,28 +88,18 @@
                 android:text="北纬 --°--′--″"
                 android:textColor="#FFFFFFFF"
                 android:textSize="16sp"
-                android:letterSpacing="0.05"
-                android:clickable="true"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="4dp" />
+                android:letterSpacing="0.05" />
 
-            <!-- 经度（可点击复制） -->
+            <!-- 经度 -->
             <TextView
                 android:id="@+id/tvLongitude"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
+                android:layout_marginTop="4dp"
                 android:text="东经 --°--′--″"
                 android:textColor="#FFFFFFFF"
                 android:textSize="16sp"
-                android:letterSpacing="0.05"
-                android:clickable="true"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="4dp" />
+                android:letterSpacing="0.05" />
 
         </LinearLayout>
 
