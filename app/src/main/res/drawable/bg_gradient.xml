@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 背景渐变：顶部青绿 → 中间蓝绿 → 底部暖橙棕 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient
+        android:type="linear"
+        android:angle="270"
+        android:startColor="#40E0D0"
+        android:centerColor="#5CB8A8"
+        android:endColor="#C8956C" />
+</shape>
